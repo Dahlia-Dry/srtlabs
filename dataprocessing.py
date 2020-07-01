@@ -7,10 +7,10 @@ import sys
 import numpy as np
 
 def test_metadata():
-    meta = DigitalMetadataReader('/Users/dahliadry/Projects/HaystackSummer2020/ch1/metadata/',accept_empty=False)
+    meta = DigitalMetadataReader('/Users/dahliadry/Projects/HaystackSummer2020/srtlabs/ch1/metadata/',accept_empty=False)
     df = meta.read_dataframe(0,50)
     print(df)
-#test_metadata()
+test_metadata()
 
 class SRTData(object):
     """
@@ -40,6 +40,7 @@ class SRTData(object):
         """Return Series of altitude coords for each data entry"""
         meta = DigitalMetadataReader(os.path.join(self.datadir,'metadata'))
         df = meta.read_dataframe(self.start,self.end)
+        print(df)
         return df['ALT']
 
     def get_az(self):
