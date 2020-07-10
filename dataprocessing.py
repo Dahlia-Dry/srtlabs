@@ -37,9 +37,7 @@ class SRTData(object):
         end: int
             end data index
         """
-        self.datadir = datadir
-        if datadir[-1] == "/":
-            self.datadir = datadir[:-1]
+        self.datadir = os.path.normpath(datadir)
         self.params = params
         meta = DigitalMetadataReader(os.path.join(self.datadir, "metadata"))
         self.metastart = meta.get_bounds()[0]
