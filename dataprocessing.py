@@ -1,24 +1,30 @@
-from digital_rf.digital_metadata import *
-import digital_rf
-#from thorosmo import *
-import pandas as pd
+import math
 import os
 import sys
+
+import digital_rf
 import numpy as np
-import numpy as np
-import math
+
+# from thorosmo import *
+import pandas as pd
+from digital_rf.digital_metadata import DigitalMetadataReader
+
 
 def test_metadata():
-    meta = DigitalMetadataReader('/Users/dahliadry/Projects/HaystackSummer2020/srtlabs/ch1/metadata/',accept_empty=False)
-    df = meta.read_dataframe(meta.get_bounds()[0],meta.get_bounds()[1])
-    print(df['ALT'])
-#test_metadata()
+    meta = DigitalMetadataReader("ch1/metadata", accept_empty=False)
+    df = meta.read_dataframe(meta.get_bounds()[0], meta.get_bounds()[1])
+    print(df["ALT"])
+
+
+# test_metadata()
+
 
 class SRTData(object):
     """
     Convert raw SRT data/metadata to pandas DF suitable for experimental analysis
     """
-    def __init__(self,datadir, params, start, end):
+
+    def __init__(self, datadir, params, start, end):
         """
         Parameters
         ----------
@@ -32,10 +38,10 @@ class SRTData(object):
             end data index
         """
         self.datadir = datadir
-        if datadir[-1] == '/':
+        if datadir[-1] == "/":
             self.datadir = datadir[:-1]
         self.params = params
-        meta = DigitalMetadataReader(os.path.join(self.datadir,'metadata'))
+        meta = DigitalMetadataReader(os.path.join(self.datadir, "metadata"))
         self.metastart = meta.get_bounds()[0]
         self.metaend = meta.get_bounds()[1]
         self.start = start
@@ -49,7 +55,7 @@ class SRTData(object):
         cfreq = None
         plot_type = None
         channel = os.path.split(self.datadir)[1]
-        #print(channel)
+        # print(channel)
         subchan = 0  # sub channel to plot
         atime = 0
         start_sample = self.start
@@ -66,31 +72,31 @@ class SRTData(object):
         msl_code_length = 0
         msl_baud_length = 0
         for f in input_files:
-            #print(("file %s" % f))
+            # print(("file %s" % f))
             try:
-                #print("loading data")
+                # print("loading data")
                 drf = digital_rf.DigitalRFReader(f)
                 chans = drf.get_channels()
-                #print(chans)
+                # print(chans)
                 if channel == "":
                     chidx = 0
                 else:
                     chidx = chans.index(channel)
                 ustart, ustop = drf.get_bounds(chans[chidx])
-                #print(ustart, ustop)
-                #print("loading metadata")
+                # print(ustart, ustop)
+                # print("loading metadata")
                 drf_properties = drf.get_properties(chans[chidx])
                 sfreq_ld = drf_properties["samples_per_second"]
                 sfreq = float(sfreq_ld)
                 toffset = start_sample
-                #print(toffset)
+                # print(toffset)
                 if atime == 0:
                     atime = ustart
                 else:
                     atime = int(np.uint64(atime * sfreq_ld))
                 sstart = atime + int(toffset)
                 dlen = stop_sample - start_sample
-                #print(sstart, dlen)
+                # print(sstart, dlen)
                 if cfreq is None:
                     # read center frequency from metadata
                     metadata_samples = drf.read_metadata(
@@ -113,8 +119,8 @@ class SRTData(object):
                         )
                         cfreq = 0.0
                 d = drf.read_vector(sstart, dlen, chans[chidx], subchan)
-                #print(d.shape)
-                #print("d", d[0:10])
+                # print(d.shape)
+                # print("d", d[0:10])
                 if len(d) < (stop_sample - start_sample):
                     print(
                         "Probable end of file, the data size is less than expected value."
@@ -124,22 +130,22 @@ class SRTData(object):
                     d = apply_msl_filter(d, msl_code_length, msl_baud_length)
             except:
                 print(("problem loading file %s" % f))
-                #traceback.print_exc(file=sys.stdout)
+                # traceback.print_exc(file=sys.stdout)
                 sys.exit()
         return d
 
     def get_alt(self):
         """Return Series of altitude coords for each data entry"""
-        meta = DigitalMetadataReader(os.path.join(self.datadir,'metadata'))
-        df = meta.read_dataframe(meta.get_bounds()[0],meta.get_bounds()[1])
-        #print(df)
-        return df['ALT']
+        meta = DigitalMetadataReader(os.path.join(self.datadir, "metadata"))
+        df = meta.read_dataframe(meta.get_bounds()[0], meta.get_bounds()[1])
+        # print(df)
+        return df["ALT"]
 
     def get_az(self):
         """Return Series of azimuth coords for each data entry"""
-        meta = DigitalMetadataReader(os.path.join(self.datadir,'metadata'))
-        df = meta.read_dataframe(meta.get_bounds()[0],meta.get_bounds()[1])
-        return df['AZ']
+        meta = DigitalMetadataReader(os.path.join(self.datadir, "metadata"))
+        df = meta.read_dataframe(meta.get_bounds()[0], meta.get_bounds()[1])
+        return df["AZ"]
 
     def get_times(self):
         """Get the time for each data entry in the specified series"""
@@ -177,20 +183,28 @@ class SRTData(object):
 
     def get_r(self):
         d = self.load_data()
-        r = np.asarray([math.hypot(x.real,x.imag) for x in d])
+        r = np.asarray([math.hypot(x.real, x.imag) for x in d])
         return r
 
     def process(self):
         data = pd.DataFrame()
-        param_dict = {'alt':self.get_alt,'az':self.get_az,'power':self.get_power,
-                        'voltage':self.get_voltage,'time':self.get_times,
-                        'r':self.get_r,'phase':self.get_phase}
+        param_dict = {
+            "alt": self.get_alt,
+            "az": self.get_az,
+            "power": self.get_power,
+            "voltage": self.get_voltage,
+            "time": self.get_times,
+            "r": self.get_r,
+            "phase": self.get_phase,
+        }
         for param in self.params:
-            print(param,' shape ',param_dict[param]().shape)
+            print(param, " shape ", param_dict[param]().shape)
             data[param] = param_dict[param]()
         return data
 
+
 def example():
-    srtdata = SRTData(datadir = '/Users/dahliadry/Projects/HaystackSummer2020/srtlabs/ch1/',
-                        params=['time','power', 'alt']).process()
-#example()
+    srtdata = SRTData(datadir="ch1", params=["time", "power", "alt"]).process()
+
+
+# example()
