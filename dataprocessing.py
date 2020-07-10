@@ -40,8 +40,9 @@ class SRTData(object):
         self.datadir = os.path.normpath(datadir)
         self.params = params
         meta = DigitalMetadataReader(os.path.join(self.datadir, "metadata"))
-        self.metastart = meta.get_bounds()[0]
-        self.metaend = meta.get_bounds()[1]
+        meta_bounds = meta.get_bounds()
+        self.metastart = meta_bounds[0]
+        self.metaend = meta_bounds[1]
         self.start = start
         self.end = end
 
