@@ -1,0 +1,1151 @@
+#!python
+# ----------------------------------------------------------------------------
+# Copyright (c) 2017 Massachusetts Institute of Technology (MIT)
+# All rights reserved.
+#
+# Distributed under the terms of the BSD 3-clause license.
+#
+# The full license is in the LICENSE file, distributed with this software.
+# ----------------------------------------------------------------------------
+"""
+ drf_plot.py -> drf_process.py
+
+ $Id$
+
+ Simple program to load 16 bit IQ data and make some basic plots. Command
+ line options are supported and data frames may be filtered from the output. The
+ program can offset into a data file to limit the memory usage when plotting
+ a subset of a data file.
+
+7/2020:
+ This copy has been revised to return data in addition to plots
+
+"""
+
+import calendar
+import getopt
+import os
+import sys
+import time
+import traceback
+
+import digital_rf
+import matplotlib
+import matplotlib.pyplot as plt
+import numpy as np
+
+
+def voltage_process(data, sfreq, toffset, modulus, integration, log_scale, title):
+    """ Break voltages by modulus and display each block. Integration here acts
+    as a pure average on the voltage level data.
+    """
+    if modulus:
+        block = 0
+        block_size = integration * modulus
+        block_toffset = toffset
+        while block < len(data) / (block_size):
+            dblock = data[block * block_size : block * block_size + modulus]
+            # complete integration
+            for idx in range(1, integration):
+                dblock += data[
+                    block * block_size
+                    + idx * modulus : block * block_size
+                    + idx * modulus
+                    + modulus
+                ]
+
+            dblock /= integration
+
+            yield voltage_plot(dblock, sfreq, block_toffset, log_scale, title)
+
+            block += 1
+            block_toffset += block_size / sfreq
+
+    else:
+        yield voltage_plot(data, sfreq, toffset, log_scale, title)
+
+
+def voltage_plot(data, sfreq, toffset, log_scale, title):
+    """Plot the real and imaginary voltage from IQ data."""
+
+    print("voltage")
+
+    t_axis = np.arange(0, len(data)) / sfreq + toffset
+
+    fig = plt.figure()
+    ax0 = fig.add_subplot(2, 1, 1)
+    ax0.plot(t_axis, data.real)
+    ax0.grid(True)
+    maxr = np.nanmax(data.real)
+    minr = np.nanmin(data.real)
+
+    if minr == 0.0 and maxr == 0.0:
+        minr = -1.0
+        maxr = 1.0
+
+    ax0.axis([t_axis[0], t_axis[len(t_axis) - 1], minr, maxr])
+    ax0.set_ylabel("I sample value (A/D units)")
+
+    ax1 = fig.add_subplot(2, 1, 2)
+    ax1.plot(t_axis, data.imag)
+    ax1.grid(True)
+    maxi = np.nanmax(data.imag)
+    mini = np.nanmin(data.imag)
+
+    if mini == 0.0 and maxi == 0.0:
+        mini = -1.0
+        maxi = 1.0
+
+    ax1.axis([t_axis[0], t_axis[len(t_axis) - 1], mini, maxi])
+
+    ax1.set_xlabel("time (seconds)")
+
+    ax1.set_ylabel("Q sample value (A/D units)")
+    ax1.set_title(title)
+    data = data.imag
+    return data
+
+
+def power_process(data, sfreq, toffset, modulus, integration, log_scale, zscale, title):
+    """ Break power by modulus and display each block. Integration here acts
+    as a pure average on the power level data.
+    """
+    if modulus:
+        block = 0
+        block_size = integration * modulus
+        block_toffset = toffset
+        while block < len(data) / block_size:
+
+            vblock = data[block * block_size : block * block_size + modulus]
+            pblock = (vblock * np.conjugate(vblock)).real
+
+            # complete integration
+            for idx in range(1, integration):
+
+                vblock = data[
+                    block * block_size
+                    + idx * modulus : block * block_size
+                    + idx * modulus
+                    + modulus
+                ]
+                pblock += (vblock * np.conjugate(vblock)).real
+
+            pblock /= integration
+
+            yield power_plot(pblock, sfreq, block_toffset, log_scale, zscale, title)
+
+            block += 1
+            block_toffset += block_size / sfreq
+
+    else:
+        pdata = (data * np.conjugate(data)).real
+        yield power_plot(pdata, sfreq, toffset, log_scale, zscale, title)
+
+
+def power_plot(data, sfreq, toffset, log_scale, zscale, title):
+    """Plot the computed power of the iq data."""
+    print("power")
+
+    t_axis = np.arange(0, len(data))
+    print(t_axis)
+    if log_scale:
+        lrxpwr = 10 * np.log10(data + 1e-12)
+    else:
+        lrxpwr = data
+
+    zscale_low, zscale_high = zscale
+
+    if zscale_low == 0 and zscale_high == 0:
+        lrxpwr_ma = np.ma.masked_invalid(lrxpwr)
+        if log_scale:
+            zscale_low = lrxpwr_ma.min()
+            zscale_high = lrxpwr_ma.max() + 3.0
+        else:
+            zscale_low = lrxpwr_ma.min()
+            zscale_high = lrxpwr_ma.max()
+
+    fig = plt.figure()
+    ax = fig.add_subplot(1, 1, 1)
+    ax.plot(t_axis, lrxpwr.real)
+    ax.grid(True)
+    ax.axis([toffset, t_axis[len(t_axis) - 1], zscale_low, zscale_high])
+
+    ax.set_xlabel("time (seconds)")
+    if log_scale:
+        ax.set_ylabel("power (dB)")
+    else:
+        ax.set_ylabel("power")
+    ax.set_title(title)
+    data = lrxpwr.real
+    return data
+
+
+def iq_process(data, sfreq, toffset, modulus, integration, log_scale, title):
+    """ Break voltages by modulus and display each block. Integration here acts
+    as a pure average on the voltage level data prior to iq plotting.
+    """
+    if modulus:
+        block = 0
+        block_size = integration * modulus
+        block_toffset = toffset
+        while block < len(data) / block_size:
+            dblock = data[block * block_size : block * block_size + modulus]
+            # complete integration
+            for idx in range(1, integration):
+                dblock += data[
+                    block * block_size
+                    + idx * modulus : block * block_size
+                    + idx * modulus
+                    + modulus
+                ]
+
+            dblock /= integration
+
+            yield iq_plot(dblock, block_toffset, log_scale, title)
+
+            block += 1
+            block_toffset += block_size / sfreq
+
+    else:
+        yield iq_plot(data, toffset, log_scale, title)
+
+
+def iq_plot(data, toffset, log_scale, title):
+    """Plot an IQ circle from the data in linear or log scale."""
+    print("iq")
+
+    if log_scale:
+        rx_raster_r = (
+            np.sign(data.real) * np.log10(np.abs(data.real) + 1e-30) / np.log10(2.0)
+        )
+        rx_raster_i = (
+            np.sign(data.imag) * np.log10(np.abs(data.imag) + 1e-30) / np.log10(2.0)
+        )
+    else:
+        data *= 1.0 / 32768.0
+        rx_raster_r = data.real
+        rx_raster_i = data.imag
+
+    fig = plt.figure()
+    ax = fig.add_subplot(1, 1, 1)
+    ax.plot(rx_raster_r, rx_raster_i, ".")
+
+    axmx = np.max([np.nanmax(rx_raster_r), np.nanmax(rx_raster_i)])
+
+    ax.axis([-axmx, axmx, -axmx, axmx])
+    ax.grid(True)
+    ax.set_xlabel("I")
+    ax.set_ylabel("Q")
+    ax.set_title(title)
+    data = [rx_raster_r,rx_raster_i]
+    return data
+
+
+def phase_process(data, sfreq, toffset, modulus, integration, log_scale, title):
+    """ Break voltages by modulus and display the phase of each block. Integration here acts
+    as a pure average on the voltage level data prior to iq plotting.
+    """
+    if modulus:
+        block = 0
+        block_size = integration * modulus
+        block_toffset = toffset
+        while block < len(data) / block_size:
+            dblock = data[block * block_size : block * block_size + modulus]
+            # complete integration
+            for idx in range(1, integration):
+                dblock += data[
+                    block * block_size
+                    + idx * modulus : block * block_size
+                    + idx * modulus
+                    + modulus
+                ]
+
+            dblock /= integration
+
+            yield phase_plot(dblock, block_toffset, log_scale, title)
+
+            block += 1
+            block_toffset += block_size / sfreq
+
+    else:
+        yield phase_plot(data, toffset, log_scale, title)
+
+
+def phase_plot(data, toffset, log_scale, title):
+    """Plot the phase of the data in linear or log scale."""
+    print("phase")
+
+    phase = np.angle(data) / np.pi
+
+    fig = plt.figure()
+    ax = fig.add_subplot(1, 1, 1)
+    ax.plot(phase)
+
+    # ax.axis([-axmx, axmx, -axmx, axmx])
+    ax.grid(True)
+    ax.set_xlabel("time")
+    ax.set_ylabel("phase")
+    ax.set_title(title)
+    data = phase
+    return data
+
+
+def spectrum_process(
+    data,
+    sfreq,
+    cfreq,
+    toffset,
+    modulus,
+    integration,
+    bins,
+    log_scale,
+    zscale,
+    detrend,
+    title,
+    clr,
+):
+    """ Break spectrum by modulus and display each block. Integration here acts
+    as a pure average on the spectral data.
+    """
+    if detrend:
+        dfn = matplotlib.mlab.detrend_mean
+    else:
+        dfn = matplotlib.mlab.detrend_none
+
+    win = np.blackman(bins)
+
+    if modulus:
+        block = 0
+        block_size = integration * modulus
+        block_toffset = toffset
+        while block < len(data) / block_size:
+
+            vblock = data[block * block_size : block * block_size + modulus]
+            pblock, freq = matplotlib.mlab.psd(
+                vblock,
+                NFFT=bins,
+                Fs=sfreq,
+                detrend=dfn,
+                window=win,
+                scale_by_freq=False,
+            )
+
+            # complete integration
+            for idx in range(1, integration):
+
+                vblock = data[
+                    block * block_size
+                    + idx * modulus : block * block_size
+                    + idx * modulus
+                    + modulus
+                ]
+                pblock_n, freq = matplotlib.mlab.psd(
+                    vblock,
+                    NFFT=bins,
+                    Fs=sfreq,
+                    detrend=dfn,
+                    window=matplotlib.mlab.window_hanning,
+                    scale_by_freq=False,
+                )
+                pblock += pblock_n
+
+            pblock /= integration
+
+            yield spectrum_plot(
+                pblock, freq, cfreq, block_toffset, log_scale, zscale, title, clr
+            )
+
+            block += 1
+            block_toffset += block_size / sfreq
+
+    else:
+        pdata, freq = matplotlib.mlab.psd(
+            data, NFFT=bins, Fs=sfreq, detrend=dfn, window=win, scale_by_freq=False
+        )
+        yield spectrum_plot(pdata, freq, cfreq, toffset, log_scale, zscale, title, clr)
+
+
+def spectrum_plot(data, freq, cfreq, toffset, log_scale, zscale, title, clr):
+    """Plot a spectrum from the data for a given fft bin size."""
+    print("spectrum")
+    tail_str = ""
+    if log_scale:
+        #        pss = 10.0*np.log10(data / np.max(data))
+        pss = 10.0 * np.log10(data + 1e-12)
+        tail_str = " (dB)"
+    else:
+        pss = data
+
+    print(freq)
+    freq_s = freq / 1.0e6 + cfreq / 1.0e6
+    print(freq_s)
+    zscale_low, zscale_high = zscale
+
+    if zscale_low == 0 and zscale_high == 0:
+        pss_ma = np.ma.masked_invalid(pss)
+        if log_scale:
+            zscale_low = np.median(pss_ma.min()) - 3.0
+            zscale_high = np.median(pss_ma.max()) + 3.0
+        else:
+            zscale_low = np.median(pss_ma.min())
+            zscale_high = np.median(pss_ma.max())
+
+    fig = plt.figure()
+    ax = fig.add_subplot(1, 1, 1)
+    ax.plot(freq_s, pss,clr)
+    print(freq_s[0], freq_s[-1], zscale_low, zscale_high)
+    ax.axis([freq_s[0], freq_s[-1], zscale_low, zscale_high])
+    ax.grid(True)
+    ax.set_xlabel("frequency (MHz)")
+    ax.set_ylabel("power spectral density" + tail_str, fontsize=12)
+    ax.set_title(title)
+    data = [freq_s,pss]
+    return data
+
+
+def histogram_process(
+    data, sfreq, toffset, modulus, integration, bins, log_scale, title
+):
+    """ Break voltages by modulus and display each block. Integration here acts
+    as a pure average on the voltage level data prior to the histogram.
+    """
+    if modulus:
+        block = 0
+        block_size = integration * modulus
+        block_toffset = toffset
+        while block < len(data) / block_size:
+            dblock = data[block * block_size : block * block_size + modulus]
+            # complete integration
+            for idx in range(1, integration):
+                dblock += data[
+                    block * block_size
+                    + idx * modulus : block * block_size
+                    + idx * modulus
+                    + modulus
+                ]
+
+            dblock /= integration
+
+            yield histogram_plot(dblock, sfreq, block_toffset, bins, log_scale, title)
+
+            block += 1
+            block_toffset += block_size / sfreq
+
+    else:
+        yield histogram_plot(data, sfreq, toffset, bins, log_scale, title)
+
+
+def histogram_plot(data, sfreq, toffset, bins, log_scale, title):
+    """Plot a histogram of the data for a given bin size."""
+    print("histogram")
+
+    fig = plt.figure()
+    ax = fig.add_subplot(1, 1, 1)
+    ax.hist(np.real(data), bins, log=log_scale, histtype="bar", color=["green"])
+    ax.hist(np.imag(data), bins, log=log_scale, histtype="bar", color=["blue"])
+    ax.grid(True)
+    ax.set_xlabel("adc value")
+    ax.set_ylabel("frequency")
+    ax.set_title(title)
+    data = [np.real(data),np.imag(data)]
+    return data
+
+
+def specgram_process(
+    data,
+    sfreq,
+    cfreq,
+    toffset,
+    modulus,
+    integration,
+    bins,
+    detrend,
+    log_scale,
+    zscale,
+    title,
+):
+    """ Break spectrum by modulus and display each block. Integration here acts
+    as a pure average on the spectral data.
+    """
+
+    if detrend:
+        dfn = matplotlib.mlab.detrend_mean
+    else:
+        dfn = matplotlib.mlab.detrend_none
+
+    noverlap = int(bins * 0.9)
+
+    if modulus:
+        block = 0
+        block_size = integration * modulus
+        block_toffset = toffset
+        while block < len(data) / block_size:
+
+            vblock = data[(block * block_size) : (block * block_size + modulus)]
+            pblock, freq, tm = matplotlib.mlab.specgram(
+                vblock,
+                NFFT=bins,
+                Fs=sfreq,
+                noverlap=noverlap,
+                detrend=dfn,
+                window=matplotlib.mlab.window_hanning,
+                scale_by_freq=False,
+            )
+
+            # complete integration
+            for idx in range(1, integration):
+
+                vblock = data[
+                    (block * block_size + idx * modulus) : (
+                        block * block_size + idx * modulus + modulus
+                    )
+                ]
+                pblock_n, freq, tm = matplotlib.mlab.specgram(
+                    vblock,
+                    NFFT=bins,
+                    Fs=sfreq,
+                    noverlap=noverlap,
+                    detrend=dfn,
+                    window=matplotlib.mlab.window_hanning,
+                    scale_by_freq=False,
+                )
+                pblock += pblock_n
+
+            pblock /= integration
+
+            extent = (
+                block_toffset,
+                (block_size / sfreq + block_toffset),
+                -(sfreq / 2.0e6) + (cfreq / 1.0e6),
+                (sfreq / 2.0e6) + (cfreq / 1.0e6),
+            )
+
+            yield specgram_plot(pblock, extent, log_scale, zscale, title)
+
+            block += 1
+            block_toffset += block_size / sfreq
+
+    else:
+        pdata, freq, tm = matplotlib.mlab.specgram(
+            data,
+            NFFT=bins,
+            Fs=sfreq,
+            noverlap=noverlap,
+            detrend=dfn,
+            window=matplotlib.mlab.window_hanning,
+            scale_by_freq=False,
+        )
+
+        extent = (
+            toffset,
+            (len(data) / sfreq + toffset),
+            -(sfreq / 2.0e6) + (cfreq / 1.0e6),
+            (sfreq / 2.0e6) + (cfreq / 1.0e6),
+        )
+
+        yield specgram_plot(pdata, extent, log_scale, zscale, title)
+
+
+def specgram_plot(data, extent, log_scale, zscale, title):
+    """Plot a specgram from the data for a given fft size."""
+    print("specgram")
+
+    # set to log scaling
+    if log_scale:
+        Pss = 10.0 * np.log10(data + 1e-12)
+    else:
+        Pss = data
+
+    # scale for zero centered kilohertz
+    # determine image x-y extent
+
+    # determine image color extent in log scale units
+    zscale_low, zscale_high = zscale
+
+    if zscale_low == 0 and zscale_high == 0:
+        Pss_ma = np.ma.masked_invalid(Pss)
+        if log_scale:
+            zscale_low = np.median(Pss_ma.min()) - 3.0
+            zscale_high = np.median(Pss_ma.max()) + 10.0
+        else:
+            zscale_low = np.median(Pss_ma.min())
+            zscale_high = np.median(Pss_ma.max())
+
+    vmin = zscale_low
+    vmax = zscale_high
+
+    fig = plt.figure()
+    ax = fig.add_subplot(1, 1, 1)
+    img = ax.imshow(
+        Pss,
+        extent=extent,
+        vmin=vmin,
+        vmax=vmax,
+        origin="lower",
+        interpolation="none",
+        aspect="auto",
+    )
+    cb = fig.colorbar(img, ax=ax)
+    ax.set_xlabel("time (seconds)")
+    ax.set_ylabel("frequency (MHz)", fontsize=12)
+    if log_scale:
+        cb.set_label("power (dB)")
+    else:
+        cb.set_label("power")
+    ax.set_title(title)
+    data = Pss
+    return data
+
+
+def rti_process(
+    data, sfreq, toffset, modulus, integration, detrend, log_scale, zscale, title
+):
+    """ Break power by modulus and make an RTI stripe for each block. Integration here acts
+    as a pure average on the power level data.
+    """
+    if modulus:
+        block = 0
+        block_size = integration * modulus
+        block_toffset = toffset
+
+        rti_bins = len(data) // block_size
+
+        RTIdata = np.zeros([modulus, rti_bins], np.complex64)
+        RTItimes = np.zeros([rti_bins])
+
+        while block < rti_bins:
+
+            vblock = data[block * block_size : block * block_size + modulus]
+            pblock = vblock * np.conjugate(vblock)
+
+            # complete integration
+            for idx in range(1, integration):
+
+                vblock = data[
+                    block * block_size
+                    + idx * modulus : block * block_size
+                    + idx * modulus
+                    + modulus
+                ]
+                pblock += vblock * np.conjugate(vblock)
+
+            pblock /= integration
+            if detrend:
+                pblock -= np.mean(pblock)
+
+            # load RTI stripe
+            # preclear the row to be written to eliminate old values from
+            # longer rasters
+            RTIdata[:, block] = 0.0
+            # write the latest row of data
+            RTIdata[0 : len(pblock), block] = pblock
+            RTItimes[block] = float(block_toffset)
+
+            block += 1
+            block_toffset += block_size / sfreq
+    else:
+        raise ValueError("Must have a modulus for an RTI!")
+
+    # create time axis
+    tick_locs = np.arange(0, rti_bins, rti_bins / len(RTItimes), dtype=np.int_)
+    tick_labels = []
+
+    for s in tick_locs:
+        tick_time = RTItimes[s]
+
+        if tick_time == 0:
+            tick_string = ""
+        else:
+            tick_string = "%04.3f" % (tick_time)
+
+        tick_labels.append(tick_string)
+
+    # create a range axis
+    rx_axis = np.arange(0, modulus) * 0.15  # km per microsecond
+
+    range_scale = 1.0e6 / sfreq  # sampling period in microseconds
+
+    rx_axis *= range_scale  # km range scale
+
+    # determine image x-y extent
+    extent = 0, rti_bins, 0, np.nanmax(rx_axis)
+
+    yield rti_plot(
+        RTIdata.real, extent, tick_locs, tick_labels, log_scale, zscale, title
+    )
+
+
+def rti_plot(data, extent, tick_locs, tick_labels, log_scale, zscale, title):
+
+    # set to log scaling
+    if log_scale:
+        RTId = 10.0 * np.log10(data + 1e-12)
+    else:
+        RTId = data
+
+    zscale_low, zscale_high = zscale
+    if zscale_low == 0 and zscale_high == 0:
+        RTId_ma = np.ma.masked_invalid(RTId)
+        if log_scale:
+            zscale_low = np.median(RTId_ma.min()) - 3.0
+            zscale_high = np.median(RTId_ma.max()) + 10.0
+        else:
+            zscale_low = np.median(RTId_ma.min())
+            zscale_high = np.median(RTId_ma.max())
+
+    vmin = zscale_low
+    vmax = zscale_high
+
+    fig = plt.figure()
+    ax = fig.add_subplot(1, 1, 1)
+    img = ax.imshow(
+        RTId,
+        origin="lower",
+        extent=extent,
+        interpolation="none",
+        vmin=vmin,
+        vmax=vmax,
+        aspect="auto",
+    )
+
+    # plot dates
+
+    ax.set_xticks(tick_locs)
+    ax.set_xticklabels(tick_labels, rotation=-45, fontsize=10)
+    fig.colorbar(img, ax=ax)
+    ax.set_xlabel("time (seconds)", fontsize=12)
+    ax.set_ylabel("range (km)", fontsize=12)
+    ax.set_title(title)
+    data = RTId
+    return data
+
+
+def sti_process(
+    data,
+    sfreq,
+    cfreq,
+    toffset,
+    modulus,
+    integration,
+    bins,
+    detrend,
+    log_scale,
+    zscale,
+    title,
+):
+    """ Break data by modulus and make an STI stripe for each block. Integration here acts
+    as a pure average on the spectrum level data.
+    """
+
+    if detrend:
+        dfn = matplotlib.mlab.detrend_mean
+    else:
+        dfn = matplotlib.mlab.detrend_none
+
+    if modulus:
+        block = 0
+        block_size = integration * modulus
+        block_toffset = toffset
+
+        sti_bins = len(data) // block_size
+
+        STIdata = np.zeros([bins, sti_bins], np.complex64)
+        STItimes = np.zeros([sti_bins])
+
+        while block < sti_bins:
+
+            vblock = data[block * block_size : block * block_size + modulus]
+            pblock, freq = matplotlib.mlab.psd(
+                vblock,
+                NFFT=bins,
+                Fs=sfreq,
+                detrend=dfn,
+                window=matplotlib.mlab.window_hanning,
+                scale_by_freq=False,
+            )
+
+            # complete integration
+            for idx in range(1, integration):
+
+                vblock = data[
+                    block * block_size
+                    + idx * modulus : block * block_size
+                    + idx * modulus
+                    + modulus
+                ]
+                pblock_n, freq = matplotlib.mlab.psd(
+                    vblock,
+                    NFFT=bins,
+                    Fs=sfreq,
+                    detrend=dfn,
+                    window=matplotlib.mlab.window_hanning,
+                    scale_by_freq=False,
+                )
+                pblock += pblock_n
+
+            pblock /= integration
+
+            # load RTI stripe
+            # preclear the row to be written to eliminate old values from
+            # longer rasters
+            STIdata[:, block] = 0.0
+            # write the latest row of data
+            STIdata[0 : len(pblock), block] = pblock
+            STItimes[block] = float(block_toffset)
+
+            block += 1
+            block_toffset += block_size / sfreq
+    else:
+        raise ValueError("Must have a modulus for an STI!")
+
+    # create time axis
+    tick_locs = np.arange(0, sti_bins, sti_bins / len(STItimes), dtype=np.int_)
+    tick_labels = []
+
+    for s in tick_locs:
+        tick_time = STItimes[s]
+
+        if tick_time == 0:
+            tick_string = ""
+        else:
+            tick_string = "%04.3f" % (tick_time)
+
+        tick_labels.append(tick_string)
+
+    extent = (
+        0,
+        sti_bins,
+        -(sfreq / 2.0e6) + (cfreq / 1.0e6),
+        (sfreq / 2.0e6) + (cfreq / 1.0e6),
+    )
+
+    yield sti_plot(
+        STIdata.real, freq, extent, tick_locs, tick_labels, log_scale, zscale, title
+    )
+
+
+def sti_plot(data, freq, extent, tick_locs, tick_labels, log_scale, zscale, title):
+
+    pss = data
+
+    # set to log scaling
+    if log_scale:
+        STId = 10.0 * np.log10(pss + 1e-12)
+    else:
+        STId = pss
+
+    zscale_low, zscale_high = zscale
+    if zscale_low == 0 and zscale_high == 0:
+        STId_ma = np.ma.masked_invalid(STId)
+        if log_scale:
+            zscale_low = np.median(STId_ma.min()) - 3.0
+            zscale_high = np.median(STId_ma.max()) + 10.0
+        else:
+            zscale_low = np.median(STId_ma.min())
+            zscale_high = np.median(STId_ma.max())
+
+    vmin = zscale_low
+    vmax = zscale_high
+
+    fig = plt.figure()
+    ax = fig.add_subplot(1, 1, 1)
+    img = ax.imshow(
+        STId,
+        origin="lower",
+        extent=extent,
+        interpolation="none",
+        vmin=vmin,
+        vmax=vmax,
+        aspect="auto",
+    )
+
+    # plot dates
+
+    cb = fig.colorbar(img, ax=ax)
+    ax.set_xticks(tick_locs)
+    ax.set_xticklabels(tick_labels, rotation=-45, fontsize=10)
+    ax.set_xlabel("time (seconds)", fontsize=12)
+    ax.set_ylabel("frequency (MHz)", fontsize=12)
+    if log_scale:
+        cb.set_label("power (dB)")
+    else:
+        cb.set_label("power")
+    ax.set_title(title)
+    data = STId
+    return data
+
+
+def hex2vec(h, ell):
+    """hex2vec(h, ell) generates sign vector of length ell from the hex string h.
+    ell must be <= 4*len(h) (excluding the optional leading "0x")
+    """
+
+    if h[0:2] in ["0x", "0X"]:
+        h = h[2:]
+
+    nybble = np.array(
+        [
+            [0, 0, 0, 0],
+            [0, 0, 0, 1],
+            [0, 0, 1, 0],
+            [0, 0, 1, 1],
+            [0, 1, 0, 0],
+            [0, 1, 0, 1],
+            [0, 1, 1, 0],
+            [0, 1, 1, 1],
+            [1, 0, 0, 0],
+            [1, 0, 0, 1],
+            [1, 0, 1, 0],
+            [1, 0, 1, 1],
+            [1, 1, 0, 0],
+            [1, 1, 0, 1],
+            [1, 1, 1, 0],
+            [1, 1, 1, 1],
+        ]
+    )
+
+    vec = np.ravel(np.array([nybble[int(x, 16)] for x in h]))
+
+    if len(vec) < ell:
+        raise ValueError("hex string too short")
+    return vec[len(vec) - ell :]
+
+
+def apply_msl_filter(data, msl_code_length, msl_baud_length):
+
+    code_table = {
+        2: [0, 1],  # barker codes
+        3: [0, 0, 1],
+        4: [0, 1, 0, 0],
+        5: [0, 0, 0, 1, 0],
+        7: [0, 0, 0, 1, 1, 0, 1],
+        11: [0, 0, 0, 1, 1, 1, 0, 1, 1, 0, 1],
+        13: [0, 0, 0, 0, 0, 1, 1, 0, 0, 1, 0, 1, 0],
+        # MSL codes from here down
+        14: [0, 1, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 1],
+        15: [0, 0, 1, 1, 0, 0, 0, 0, 0, 1, 0, 1, 0, 1, 1],
+        16: [0, 1, 1, 0, 1, 0, 0, 0, 0, 1, 1, 1, 0, 1, 1, 1],
+        17: [0, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 0, 0, 1, 0, 1, 1],
+        18: [0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 1, 1, 1, 1, 0, 1, 0, 1],
+        19: [1, 0, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 0, 0, 1, 1, 1, 1],
+        20: [0, 1, 0, 1, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 1, 1, 0, 1, 1],
+        21: [1, 0, 1, 1, 0, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 0, 0, 0, 0, 1, 1],
+        22: [0, 0, 1, 1, 1, 0, 0, 1, 1, 0, 1, 1, 0, 1, 0, 1, 0, 1, 1, 1, 1, 1],
+        23: [0, 1, 1, 1, 0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 1, 0, 1, 0, 0, 1, 0, 0, 1],
+        24: [0, 1, 1, 0, 0, 1, 0, 0, 1, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 1, 1],
+        25: [1, 0, 0, 1, 0, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 1, 1, 0, 1, 1, 0, 0, 1],
+        26: hex2vec("0x2380ad9", 26),
+        27: hex2vec("0x25bbb87", 27),
+        28: hex2vec("0xDA44478", 28),
+        29: hex2vec("0x164a80e7", 29),
+        30: hex2vec("0x2315240f", 30),
+        31: hex2vec("0x2a498c0f", 31),
+        32: hex2vec("0x1d8d3bf3", 32),
+        33: hex2vec("0x0ccaa587f", 33),
+        34: hex2vec("0x333fe1a55", 34),
+        49: hex2vec("0x012ABEC79E46F", 49),
+        50: hex2vec("0x025863ABC266F", 50),
+        51: hex2vec("0x71C077376ADB4", 51),
+        52: hex2vec("0x0945AE0F3246F", 52),
+        53: hex2vec("0x0132AA7F8D2C6F", 53),
+        54: hex2vec("0x0266A2814B3C6F", 54),
+        55: hex2vec("0x04C26AA1E3246F", 55),
+        56: hex2vec("0x099BAACB47BC6F", 56),
+        57: hex2vec("0x01268A8ED623C6F", 57),
+        58: hex2vec("0x023CE545C9ED66F", 58),
+        59: hex2vec("0x049D38128A1DC6F", 59),
+        60: hex2vec("0x0AB8DF0C973252F", 60),
+        61: hex2vec("0x00459CC5F4694BAF", 61),
+        62: hex2vec("0x008B1B5318BE4BAF", 62),
+        63: hex2vec("0x04CF5A2471657C6F", 63),
+        64: hex2vec("0x122B21E9978C2BBF", 64),
+        65: hex2vec("0x1045A6A6270AC4BBF", 65),
+        66: hex2vec("0x088B8CF1325A50BBF", 66),
+        67: hex2vec("0x01169F29AC67C4B9F", 67),
+        68: hex2vec("0x122B43963E8662BBF", 68),
+        69: hex2vec("0x1D9024F657C5EE71EA", 69),
+        70: hex2vec("0x1A133B4E3093EDD57E", 70),
+        71: hex2vec("0x63383AB6B452ED93FE", 71),
+        72: hex2vec("0xE4CD5AF0D054433D82", 72),
+        73: hex2vec("0x1B66B26359C3E2BC00A", 73),
+        74: hex2vec("0x36DDBED681F98C70EAE", 74),
+        75: hex2vec("0x6399C983D03EFDB556D", 75),
+        76: hex2vec("0xDB69891118E2C2A1FA0", 76),
+        77: hex2vec("0x1961AE251DC950FDDBF4", 77),
+        78: hex2vec("0x328B457F0461E4ED7B73", 78),
+        79: hex2vec("0x76CF68F327438AC6FA80", 79),
+        80: hex2vec("0xCE43C8D986ED429F7D75", 80),
+        81: hex2vec("0x0E3C32FA1FEFD2519AB32", 81),
+        82: hex2vec("0x3CB25D380CE3B7765695F", 82),
+        83: hex2vec("0x711763AE7DBB8482D3A5A", 83),
+        84: hex2vec("0xCE79CCCDB6003C1E95AAA", 84),
+        85: hex2vec("0x19900199463E51E8B4B574", 85),
+        86: hex2vec("0x3603FB659181A2A52A38C7", 86),
+        87: hex2vec("0x7F7184F04F4E5E4D9B56AA", 87),
+        88: hex2vec("0x9076589AF5702502CE2CE2", 88),
+        89: hex2vec("0x180E09434E1BBC44ACDAC8A", 89),
+        90: hex2vec("0x3326D87C3A91DA8AFA84211", 90),
+        91: hex2vec("0x77F80E632661C3459492A55", 91),
+        92: hex2vec("0xCC6181859D9244A5EAA87F0", 92),
+        93: hex2vec("0x187B2ECB802FB4F56BCCECE5", 93),
+        94: hex2vec("0x319D9676CAFEADD68825F878", 94),
+        95: hex2vec("0x69566B2ACCC8BC3CE0DE0005", 95),
+        96: hex2vec("0xCF963FD09B1381657A8A098E", 96),
+        97: hex2vec("0x1A843DC410898B2D3AE8FC362", 97),
+        98: hex2vec("0x30E05C18A1525596DCCE600DF", 98),
+        99: hex2vec("0x72E6DB6A75E6A9E81F0846777", 99),
+        100: hex2vec("0xDF490FFB1F8390A54E3CD9AAE", 100),
+        101: hex2vec("0x1A5048216CCF18F83E910DD4C5", 101),
+        102: hex2vec("0x2945A4F11CE44FF664850D182A", 102),
+        103: hex2vec("0x77FAAB2C6E065AC4BE18F274CB", 103),
+        104: hex2vec("0xE568ED4982F9660EBA2F611184", 104),
+        105: hex2vec("0x1C6387FF5DA4FA325C895958DC5", 105),
+    }
+
+    print(("msl filter data with code ", msl_code_length))
+    code = code_table[msl_code_length]
+    block = msl_baud_length
+    x_msl = np.zeros(msl_baud_length * len(code), dtype=np.complex64)
+    idx = 0
+    for c in code:
+        if c == 1:
+            x_msl[idx * block : idx * block + block] = (
+                np.ones(block, dtype=np.float64) + 0j
+            )
+        else:
+            x_msl[idx * block : idx * block + block] = (
+                -1.0 * np.ones(block, dtype=np.float64) + 0j
+            )
+        idx += 1
+
+    dc = np.correlate(data, x_msl, "full")[
+        (len(x_msl) - 1) : (len(data) + len(x_msl) - 1)
+    ]
+
+    return dc
+
+
+# load data and plot it!
+
+
+def drf_process(drf_data,sfreq,plot_type,start_sample,stop_sample):
+    print('here',plot_type)
+    # default values
+    input_files = []
+    d = drf_data
+    sfreq = 0.0
+    cfreq = None
+    toffset = start_sample
+    channel = ""
+    subchan = 0  # sub channel to plot
+    atime = 0
+    modulus = None
+    integration = 1
+
+    zscale = (0, 0)
+
+    bins = 256
+
+    title = ""
+    log_scale = False
+    detrend = False
+    show_plots = False
+    plot_file = ""
+
+    msl_code_length = 0
+    msl_baud_length = 0
+
+    if plot_type == "power":
+        data = power_process(
+            d, sfreq, toffset, modulus, integration, log_scale, zscale, title
+        )
+
+    elif plot_type == "iq":
+        data = iq_process(
+            d, sfreq, toffset, modulus, integration, log_scale, title
+        )
+
+    elif plot_type == "phase":
+        data = phase_process(
+            d, sfreq, toffset, modulus, integration, log_scale, title
+        )
+
+    elif plot_type == "voltage":
+        data = voltage_process(
+            d, sfreq, toffset, modulus, integration, log_scale, title
+        )
+
+    elif plot_type == "histogram":
+        data = histogram_process(
+            d, sfreq, toffset, modulus, integration, bins, log_scale, title
+        )
+
+    elif plot_type == "spectrum":
+        data = spectrum_process(
+            d,
+            sfreq,
+            cfreq,
+            toffset,
+            modulus,
+            integration,
+            bins,
+            log_scale,
+            zscale,
+            detrend,
+            title,
+            "b",
+        )
+
+    elif plot_type == "specgram":
+        data = specgram_process(
+            d,
+            sfreq,
+            cfreq,
+            toffset,
+            modulus,
+            integration,
+            bins,
+            detrend,
+            log_scale,
+            zscale,
+            title,
+        )
+
+    elif plot_type == "rti":
+        data = rti_process(
+            d,
+            sfreq,
+            toffset,
+            modulus,
+            integration,
+            detrend,
+            log_scale,
+            zscale,
+            title,
+        )
+
+    elif plot_type == "sti":
+        data = sti_process(
+            d,
+            sfreq,
+            cfreq,
+            toffset,
+            modulus,
+            integration,
+            bins,
+            detrend,
+            log_scale,
+            zscale,
+            title,
+        )
+
+    else:
+        raise ValueError("Unknown plot type %s" % plot_type)
+
+    fin = []
+    i = 1
+    for d in data:
+        print('generating# ',i)
+        fin=d
+        i = i + 1
+    return fin
